@@ -2,16 +2,47 @@ package main
 
 import (
 	"fmt"
+	"math"
+
 	"github.com/xthexder/go-jack"
 )
 
-var channels int = 2 // Number of channels to process
+const (
+	channels     = 2     // Number of channels to process
+	PCMMax       = 1.0   // Maximum float value for PCM audio
+	ReferenceFS  = -26.0 // Reference value for FS
+	ReferenceSPL = 94.0  // Reference value for SPL
+	BufferSize   = 1024  // Number of samples to calculate dB SPL
+)
 
 // Global declarations for JACK audio ports and client
-var PortsIn []*jack.Port
-var PortsOut []*jack.Port
-var JackClient *jack.Client
-var isConnected bool // A flag to check if the client is connected
+var (
+	PortsIn     []*jack.Port
+	PortsOut    []*jack.Port
+	JackClient  *jack.Client
+	isConnected bool // Flag to check if the client is connected
+)
+
+func computeRMS(samples []jack.AudioSample) float64 {
+	var sum float64
+	for _, sample := range samples {
+		sum += float64(sample * sample)
+	}
+	return math.Sqrt(sum / float64(len(samples)))
+}
+
+func rmsToDBFS(rms float64) float64 {
+	if rms == 0.0 {
+		return -math.Inf(0) // or some other predefined value for silence
+	}
+	return 20.0 * math.Log10(rms/PCMMax)
+}
+
+func dBFS_to_dBSPL(dbfs float64) float64 {
+	return (dbfs - ReferenceFS) + ReferenceSPL
+}
+
+var samples []uint32
 
 // process handles the audio data for each frame.
 // For now, it prints the non-zero samples from the first channel.
@@ -20,28 +51,33 @@ func process(nframes uint32) int {
 
 	// Check if the client is connected before processing
 	if isConnected {
-		samplesIn := port.GetBuffer(nframes)
 
-		// Print non-zero samples for debugging
-		for i, sample := range samplesIn {
-			if sample != 0 {
-				fmt.Println("sample no", i, " :", sample)
-			}
+		samplesIn := port.GetBuffer(nframes)
+		// Compute and print if samplesIn size meets or exceeds BufferSize
+		if len(samplesIn) >= BufferSize {
+			rms := computeRMS(samplesIn)
+			dbFS := rmsToDBFS(rms)
+			dbSPL := dBFS_to_dBSPL(dbFS)
+
+			fmt.Printf("RMS: %f, dB FS: %f, dB SPL: %f\n", rms, dbFS, dbSPL)
 		}
 	}
-
 	return 0
 }
 
 // processXX is a callback for when port connections change.
 func processXX(x jack.PortId, y jack.PortId, z bool) {
-	isConnected = true
-	fmt.Println("connected")
+	isConnected = z // Use z to determine connection status
+	if isConnected {
+		fmt.Println("connected")
+	} else {
+		fmt.Println("disconnected")
+	}
 }
 
 func main() {
-	var status int
 	// Open a new JACK client named "Go Passthrough"
+	var status int
 	JackClient, status = jack.ClientOpen("Go Passthrough", jack.NoStartServer)
 	if status != 0 {
 		fmt.Println("Status:", jack.StrError(status))
