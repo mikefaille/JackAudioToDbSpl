@@ -2,8 +2,14 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"math"
 
+	"net/http"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/xthexder/go-jack"
 )
 
@@ -21,6 +27,16 @@ var (
 	PortsOut    []*jack.Port
 	JackClient  *jack.Client
 	isConnected bool // Flag to check if the client is connected
+
+	reg     = prometheus.NewRegistry()
+	factory = promauto.With(reg)
+
+	gaugeSPL = factory.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "environment",
+			Name:      "sound_pressure_level_db",
+			Help:      "Current Sound Pressure Level (SPL) in decibels (dB).",
+		})
 )
 
 func computeRMS(samples []jack.AudioSample) float64 {
@@ -59,7 +75,9 @@ func process(nframes uint32) int {
 			dbFS := rmsToDBFS(rms)
 			dbSPL := dBFS_to_dBSPL(dbFS)
 
-			fmt.Printf("RMS: %f, dB FS: %f, dB SPL: %f\n", rms, dbFS, dbSPL)
+			log.Printf("RMS: %f, dB FS: %f, dB SPL: %f\n", rms, dbFS, dbSPL)
+			gaugeSPL.Set(dbSPL)
+
 		}
 	}
 	return 0
@@ -67,15 +85,23 @@ func process(nframes uint32) int {
 
 // processXX is a callback for when port connections change.
 func processXX(x jack.PortId, y jack.PortId, z bool) {
+
 	isConnected = z // Use z to determine connection status
-	if isConnected {
-		fmt.Println("connected")
-	} else {
-		fmt.Println("disconnected")
+	if JackClient.GetPortById(x).GetName() == "Go Passthrough:in_0" {
+		if isConnected {
+			log.Println("connected")
+		} else {
+			log.Println("disconnected")
+		}
 	}
+
 }
 
 func main() {
+
+	prometheus.MustRegister(gaugeSPL)
+	http.Handle("/metrics", promhttp.Handler())
+
 	// Open a new JACK client named "Go Passthrough"
 	var status int
 	JackClient, status = jack.ClientOpen("Go Passthrough", jack.NoStartServer)
@@ -102,20 +128,20 @@ func main() {
 
 	// Set a callback for when port connections change
 	if code := JackClient.SetPortConnectCallback(processXX); code != 0 {
-		fmt.Println("Failed to set process callback:", jack.StrError(code))
+		log.Println("Failed to set process callback:", jack.StrError(code))
 		return
 	}
 
 	// Set the main processing callback for the audio data
 	if code := JackClient.SetProcessCallback(process); code != 0 {
-		fmt.Println("Failed to set process callback:", jack.StrError(code))
+		log.Println("Failed to set process callback:", jack.StrError(code))
 		return
 	}
 
 	// Create a channel to wait for shutdown
 	shutdown := make(chan struct{})
 	JackClient.OnShutdown(func() {
-		fmt.Println("Shutting down")
+		log.Println("Shutting down")
 		close(shutdown)
 	})
 
@@ -125,6 +151,7 @@ func main() {
 		return
 	}
 
-	fmt.Println(JackClient.GetName())
+	log.Println(JackClient.GetName())
+	log.Fatal(http.ListenAndServe(":8080", nil))
 	<-shutdown // Wait here until a shutdown signal is received
 }
